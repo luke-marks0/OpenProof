@@ -1,0 +1,11 @@
+train_new_tokenizer: true
+batch_size: 32
+num_epochs: 5
+learning_rate: 0.0001
+model:
+  emb_size: 512
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.1
