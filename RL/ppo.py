@@ -1,5 +1,7 @@
 import os
 import sys
+import argparse
+import yaml
 import json
 import torch
 import wandb
@@ -7,10 +9,11 @@ import logging
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from typing import List, Tuple, Dict, Any
+
 from tokenizers import Tokenizer
 from lean4_environment import Lean4Environment
 from policy_value_model import PolicyValueModel
-from utils import generate_square_subsequent_mask
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data import (
@@ -21,11 +24,18 @@ from data import (
     remove_sorry_suffix,
 )
 from model import AlternatingEncoderDecoder
+from utils import generate_square_subsequent_mask, parse_config
 
 logging.basicConfig(level=logging.INFO)
 
 
-def load_model_and_tokenizer():
+def parse_config(config_path: str) -> Dict[str, Any]:
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
+
+
+def load_model_and_tokenizer(config: Dict[str, Any]) -> Tuple[AlternatingEncoderDecoder, Tokenizer, int, Dict[str, Any]]:
     wandb.init(project="OpenProof", job_type="download")
 
     model_artifact = wandb.use_artifact('final_transformer:latest')
@@ -45,7 +55,7 @@ def load_model_and_tokenizer():
         nhead=model_params["nhead"],
         dim_feedforward=model_params["dim_feedforward"],
         dropout=model_params["dropout"],
-        max_seq_length=5000
+        max_seq_length=model_params.get("max_seq_length", 5000)
     )
     base_model.load_state_dict(torch.load(model_path, map_location=torch.device('cpu')))
     base_model.eval()
@@ -60,22 +70,28 @@ def load_model_and_tokenizer():
 
 
 class LeanPPODataset(Dataset):
-    def __init__(self, data_tuples):
+    def __init__(self, data_tuples: List[Tuple[str, str, str, int]]):
         self.data_tuples = data_tuples
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data_tuples)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Tuple[str, str, str, int]:
         return self.data_tuples[idx]
 
 
-def ppo_collate_fn(batch):
+def ppo_collate_fn(batch: List[Tuple[str, str, str, int]]) -> Tuple[List[str], List[str], List[str], List[int]]:
     formal_statements, state_befores, state_afters, tactic_ids = zip(*batch)
     return list(formal_statements), list(state_befores), list(state_afters), list(tactic_ids)
 
 
-def generate_action(policy_value_model, src_ids, device, tokenizer, max_generation_steps=50):
+def generate_action(
+    policy_value_model: PolicyValueModel,
+    src_ids: torch.Tensor,
+    device: torch.device,
+    tokenizer: Tokenizer,
+    max_generation_steps: int = 50
+) -> Tuple[List[int], torch.Tensor, torch.Tensor, torch.Tensor]:
     policy_value_model.eval()
     tgt_input_ids = torch.tensor([tokenizer.token_to_id("[BOS]")], dtype=torch.long).unsqueeze(1).to(device)
     generated_tactic = []
@@ -124,7 +140,16 @@ def generate_action(policy_value_model, src_ids, device, tokenizer, max_generati
     return generated_tactic, total_log_prob, value_estimate, tgt_input_ids.detach()
 
 
-def ppo_update(policy_value_model, optimizer, old_log_prob, state, action, return_, advantage, clip_param=0.2):
+def ppo_update(
+    policy_value_model: PolicyValueModel,
+    optimizer: torch.optim.Optimizer,
+    old_log_prob: torch.Tensor,
+    state: Tuple[torch.Tensor, torch.Tensor],
+    action: torch.Tensor,
+    return_: torch.Tensor,
+    advantage: torch.Tensor,
+    clip_param: float = 0.2
+) -> Tuple[float, float, float]:
     policy_value_model.train()
     src_input_ids, tgt_input_ids = state
     src_input_ids = src_input_ids.to(return_.device)
@@ -162,25 +187,25 @@ def ppo_update(policy_value_model, optimizer, old_log_prob, state, action, retur
     return loss.item(), policy_loss.item(), value_loss.item()
 
 
-def main():
+def train_model(config: Dict[str, Any]) -> None:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    base_model, tokenizer, num_tokens, model_params = load_model_and_tokenizer()
+    base_model, tokenizer, num_tokens, model_params = load_model_and_tokenizer(config)
     policy_value_model = PolicyValueModel(base_model).to(device)
-    optimizer = optim.Adam(policy_value_model.parameters(), lr=1e-20)
+    optimizer = optim.Adam(policy_value_model.parameters(), lr=config['learning_rate'])
 
-    wandb.init(project="OpenProof-PPO", config={"learning_rate": 1e-20})
+    wandb.init(project="OpenProof-PPO", config=config)
 
     data = load_data()
     tactic_to_id = get_unique_tactics(data)
     data_tuples = preprocess_data(data, tactic_to_id)
 
-    batch_size = 1
+    batch_size = config['batch_size']
     ppo_dataset = LeanPPODataset(data_tuples)
     data_loader = DataLoader(ppo_dataset, batch_size=batch_size, shuffle=True, collate_fn=ppo_collate_fn)
 
-    num_epochs = 3
-    clip_param = 0.2
+    num_epochs = config['num_epochs']
+    clip_param = config['clip_param']
 
     for epoch in range(num_epochs):
         for batch_idx, batch in enumerate(data_loader):
@@ -194,7 +219,7 @@ def main():
             src_ids = torch.tensor(src_encoding.ids, dtype=torch.long).unsqueeze(1).to(device)
 
             generated_tactic, total_log_prob, value_estimate, tgt_input_ids = generate_action(
-                policy_value_model, src_ids, device, tokenizer
+                policy_value_model, src_ids, device, tokenizer, config['max_generation_steps']
             )
             action_text = tokenizer.decode(generated_tactic)
             _, reward, _ = env.step(action_text)
@@ -226,6 +251,14 @@ def main():
     wandb.finish()
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Post-trains with PPO")
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to the config file')
+    args = parser.parse_args()
+
+    config = parse_config(args.config)
+    train_model(config)
+
+
 if __name__ == "__main__":
     main()
-

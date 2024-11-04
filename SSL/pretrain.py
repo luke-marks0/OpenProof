@@ -23,12 +23,7 @@ from data import (
     remove_sorry_suffix,
 )
 from model import AlternatingEncoderDecoder
-
-
-def parse_config(config_path: str) -> Dict:
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    return config
+from utils import generate_square_subsequent_mask, parse_config
 
 
 class LeanDataset(Dataset):
@@ -78,12 +73,6 @@ def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Te
     tgt_ids_padded = nn.utils.rnn.pad_sequence(tgt_ids, padding_value=0)
 
     return src_ids_padded, tgt_ids_padded
-
-
-def generate_square_subsequent_mask(sz: int) -> torch.Tensor:
-    """Generate a square mask for the sequence. Masked positions are filled with float('-inf')."""
-    mask = torch.triu(torch.full((sz, sz), float("-inf")), diagonal=1)
-    return mask
 
 
 def prepare_tokenizer(
