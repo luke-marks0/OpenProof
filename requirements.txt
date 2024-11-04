@@ -4,3 +4,5 @@ datasets
 tokenizers
 wandb
 pyyaml
+trl
+elan

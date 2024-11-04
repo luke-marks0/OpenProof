@@ -1,11 +1,19 @@
-from typing import List, Tuple, Dict, Any
+import argparse
+import yaml
+import json
+import os
+from typing import Dict, Any, List, Tuple
+
 import torch
 from torch import nn
 from torch.optim import Adam
-import wandb
-import os
 from torch.utils.data import DataLoader, Dataset, random_split
 from tokenizers import Tokenizer
+
+import wandb
+
+import sys
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from data import (
     load_data,
@@ -15,6 +23,12 @@ from data import (
     remove_sorry_suffix,
 )
 from model import AlternatingEncoderDecoder
+
+
+def parse_config(config_path: str) -> Dict:
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config
 
 
 class LeanDataset(Dataset):
@@ -151,7 +165,7 @@ def train_epoch(
 
         tgt_mask = generate_square_subsequent_mask(tgt_input.size(0)).to(device)
 
-        logits = model(
+        logits, _ = model(
             src_input_ids=src_ids,
             tgt_input_ids=tgt_input,
             src_key_padding_mask=src_key_padding_mask,
@@ -196,7 +210,7 @@ def validate_epoch(
 
             tgt_mask = generate_square_subsequent_mask(tgt_input.size(0)).to(device)
 
-            logits = model(
+            logits, _ = model(
                 src_input_ids=src_ids,
                 tgt_input_ids=tgt_input,
                 src_key_padding_mask=src_key_padding_mask,
@@ -259,10 +273,20 @@ def train_model(config: Dict[str, Any]) -> None:
 
     final_model_path = "final_transformer.pt"
     torch.save(model.state_dict(), final_model_path)
+
+    model_params_path = 'model_params.json'
+    model_params_to_save = model_params.copy()
+    model_params_to_save['num_tokens'] = vocab_size
+    with open(model_params_path, 'w') as f:
+        json.dump(model_params_to_save, f)
+
     final_model_artifact = wandb.Artifact("final_transformer", type="model")
     final_model_artifact.add_file(final_model_path)
+    final_model_artifact.add_file(model_params_path)
     wandb.log_artifact(final_model_artifact)
+
     os.remove(final_model_path)
+    os.remove(model_params_path)
 
     wandb.finish()
 
@@ -310,3 +334,15 @@ def load_tokenizer_from_wandb() -> Tokenizer:
     wandb.finish()
     return tokenizer
 
+
+def main():
+    parser = argparse.ArgumentParser(description="Trains the prover")
+    parser.add_argument('--config', type=str, default='config.yaml', help='Path to the config file')
+    args = parser.parse_args()
+
+    config = parse_config(args.config)
+    train_model(config)
+
+
+if __name__ == '__main__':
+    main()

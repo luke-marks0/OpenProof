@@ -5,13 +5,14 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import copy
+import math
 
 
 class PositionalEncoding(nn.Module):
     def __init__(self, emb_size: int, dropout: float = 0.1, maxlen: int = 5000):
         super(PositionalEncoding, self).__init__()
-        den = torch.exp(-torch.arange(0, emb_size, 2) * (torch.log(torch.tensor(10000.0)) / emb_size))
-        pos = torch.arange(0, maxlen).unsqueeze(1)
+        den = torch.exp(-torch.arange(0, emb_size, 2).float() * (math.log(10000.0) / emb_size))
+        pos = torch.arange(0, maxlen).unsqueeze(1).float()
         pos_embedding = torch.zeros((maxlen, emb_size))
         pos_embedding[:, 0::2] = torch.sin(pos * den)
         pos_embedding[:, 1::2] = torch.cos(pos * den)
@@ -20,14 +21,13 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, token_embedding: torch.Tensor):
         seq_len = token_embedding.size(0)
-        pos_embedding = self.pos_embedding[:seq_len, :].unsqueeze(1)
+        pos_embedding = self.pos_embedding[:seq_len, :].unsqueeze(1).to(token_embedding.device)
         return self.dropout(token_embedding + pos_embedding)
 
 
 class EncoderDecoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
         super(EncoderDecoderLayer, self).__init__()
-        # Encoder layer
         self.encoder_self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.encoder_ffn = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
@@ -39,7 +39,6 @@ class EncoderDecoderLayer(nn.Module):
         self.encoder_norm1 = nn.LayerNorm(d_model)
         self.encoder_norm2 = nn.LayerNorm(d_model)
 
-        # Decoder layer
         self.decoder_self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.decoder_cross_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         self.decoder_ffn = nn.Sequential(
@@ -107,11 +106,12 @@ class AlternatingEncoderDecoder(nn.Module):
         emb_size: int = 512,
         nhead: int = 8,
         dim_feedforward: int = 2048,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        max_seq_length: int = 512  # Added max_seq_length parameter
     ):
         super(AlternatingEncoderDecoder, self).__init__()
         self.embedding = nn.Embedding(num_tokens, emb_size)
-        self.positional_encoding = PositionalEncoding(emb_size, dropout=dropout)
+        self.positional_encoding = PositionalEncoding(emb_size, dropout=dropout, maxlen=max_seq_length)
         layer = EncoderDecoderLayer(
             d_model=emb_size,
             nhead=nhead,
@@ -121,6 +121,7 @@ class AlternatingEncoderDecoder(nn.Module):
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
         self.norm = nn.LayerNorm(emb_size)
         self.output_layer = nn.Linear(emb_size, num_tokens)
+        self.emb_size = emb_size  # Added for compatibility with PolicyValueModel
 
     def forward(
         self,
@@ -131,11 +132,10 @@ class AlternatingEncoderDecoder(nn.Module):
         src_key_padding_mask: torch.Tensor = None,
         tgt_key_padding_mask: torch.Tensor = None
     ):
-        # Embedding and positional encoding
-        src_embeddings = self.embedding(src_input_ids)
+        src_embeddings = self.embedding(src_input_ids) * torch.sqrt(torch.tensor(self.emb_size, dtype=torch.float32))
         src_embeddings = self.positional_encoding(src_embeddings)
 
-        tgt_embeddings = self.embedding(tgt_input_ids)
+        tgt_embeddings = self.embedding(tgt_input_ids) * torch.sqrt(torch.tensor(self.emb_size, dtype=torch.float32))
         tgt_embeddings = self.positional_encoding(tgt_embeddings)
 
         src = src_embeddings
@@ -153,4 +153,5 @@ class AlternatingEncoderDecoder(nn.Module):
 
         output = self.norm(tgt)
         logits = self.output_layer(output)
-        return logits
+        return logits, output  # Return both logits and decoder_output
+
